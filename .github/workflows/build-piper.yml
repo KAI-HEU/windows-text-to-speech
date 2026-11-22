@@ -1,0 +1,37 @@
+
+name: Build Custom Piper SAPI5 DLL
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-piper:
+    name: Build Piper DLL (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Piper SAPI5 DLL
+        run: cargo build --release --locked --package windows_tts_engine_piper_dll
+
+      - name: Verify compiled DLL
+        shell: pwsh
+        run: |
+          if (!(Test-Path "target/release/windows_tts_engine_piper.dll")) {
+            throw "Piper DLL was not generated"
+          }
+
+      - name: Upload compiled Piper DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-piper-sapi5-dll
+          path: target/release/windows_tts_engine_piper.dll
+          if-no-files-found: error
