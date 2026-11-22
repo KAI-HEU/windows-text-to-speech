@@ -13,7 +13,7 @@ use windows::{
         Foundation::MAX_PATH,
         Media::{
             Audio::{WAVEFORMATEX, WAVE_FORMAT_PCM},
-            Speech::{ISpObjectToken, ISpTTSEngineSite, SPVES_ABORT, SPVES_CONTINUE},
+            Speech::{ISpObjectToken, ISpTTSEngineSite, SPVES_ABORT},
         },
         System::Registry::HKEY_LOCAL_MACHINE,
     },
@@ -352,8 +352,8 @@ impl SafeTtsEngine for OurTtsEngine {
                     let sink = rodio::Sink::try_new(&handle).unwrap();
 
                     let buf = SamplesBuffer::new(
-                        audio_info.num_channels as _,
-                        audio_info.sample_rate,
+                        audio_info.num_channels as u16,
+                        audio_info.sample_rate as u32,
                         samples,
                     );
 
@@ -372,7 +372,7 @@ impl SafeTtsEngine for OurTtsEngine {
                 // Ryan:  22050 -> 22050 Hz (unchanged)
                 let resampled = resample_audio(
                     &samples,
-                    audio_info.sample_rate,
+                    audio_info.sample_rate as u32,
                     22050,
                 );
 
