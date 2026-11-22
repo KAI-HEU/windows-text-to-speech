@@ -19,8 +19,16 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      
+      - name: Configure Visual Studio C++ build environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build Piper SAPI5 DLL
         run: cargo build --release --locked --package windows_tts_engine_piper_dll
+        env:
+          CMAKE_GENERATOR: Visual Studio 17 2022
+          CMAKE_GENERATOR_PLATFORM: x64
+
 
       - name: Verify compiled DLL
         shell: pwsh
