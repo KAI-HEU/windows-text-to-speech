@@ -56,6 +56,37 @@ pub struct PiperModelInfo {
     pub language: Option<Language>,
 }
 
+/// Resample mono floating-point audio to the SAPI5 output sample rate.
+/// Uses linear interpolation and leaves matching sample rates unchanged.
+fn resample_audio(samples: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || input_rate == 0 || output_rate == 0 {
+        return samples.to_vec();
+    }
+
+    if input_rate == output_rate {
+        return samples.to_vec();
+    }
+
+    let output_len =
+        ((samples.len() as u64 * output_rate as u64) / input_rate as u64) as usize;
+
+    let mut output = Vec::with_capacity(output_len);
+
+    for i in 0..output_len {
+        let position = i as f64 * input_rate as f64 / output_rate as f64;
+        let left = position.floor() as usize;
+        let right = (left + 1).min(samples.len() - 1);
+        let fraction = (position - left as f64) as f32;
+
+        let value = samples[left] * (1.0 - fraction)
+            + samples[right] * fraction;
+
+        output.push(value);
+    }
+
+    output
+}
+
 pub struct OurTtsEngine {
     /// Don't write audio to [`ISpTTSEngineSite`], instead play it directly on
     /// the audio output device. If `true` then the client application can't
@@ -296,60 +327,91 @@ impl SafeTtsEngine for OurTtsEngine {
 
             log::debug!("Piper generating audio with: {audio_info:?}");
 
-            if self.play_audio_directly
-                || audio_info.sample_rate != 22050
-                || audio_info.num_channels != 1
-                || audio_info.sample_width != 2
-            {
-                if !self.play_audio_directly {
-                    log::warn!("Fallback to direct audio output since this model uses an uncommon audio format");
-                }
+            
+            // Collect generated audio samples
+            let mut samples: Vec<f32> = Vec::new();
+
+            for result in audio {
+                samples.extend(
+                    result.expect("Failed to generate samples").into_vec()
+                );
+            }
+
+            log::debug!(
+                "Generating the audio data took: {:?}",
+                _start_audio.elapsed()
+            );
+
+            if self.play_audio_directly {
+                // Play audio directly through Windows speakers
                 #[cfg(feature = "direct_output")]
                 {
-                    let mut samples: Vec<f32> = Vec::new();
-                    for result in audio {
-                        samples.append(&mut result.expect("Failed to generate samples").into_vec());
-                    }
-                    log::debug!(
-                        "Generating the audio data took: {:?}",
-                        _start_audio.elapsed()
-                    );
-
                     let (_stream, handle) = rodio::OutputStream::try_default()
                         .expect("Failed to create audio output stream");
+
                     let sink = rodio::Sink::try_new(&handle).unwrap();
 
-                    let buf = SamplesBuffer::new(1, 22050, samples);
-                    sink.append(buf);
+                    let buf = SamplesBuffer::new(
+                        audio_info.num_channels as _,
+                        audio_info.sample_rate,
+                        samples,
+                    );
 
+                    sink.append(buf);
                     sink.sleep_until_end();
                 }
             } else {
-                let mut samples = Vec::new();
-                for result in audio {
-                    samples
-                        .append(&mut result.expect("Failed to generate samples").as_wave_bytes());
+                // SAPI5 requires mono audio
+                if audio_info.num_channels != 1 {
+                    log::error!("Unsupported channel count");
+                    return Ok(());
                 }
-                let mut buffer = samples.as_slice();
-                loop {
+
+                // Resample audio to 22050 Hz
+                // Danny: 16000 -> 22050 Hz
+                // Ryan:  22050 -> 22050 Hz (unchanged)
+                let resampled = resample_audio(
+                    &samples,
+                    audio_info.sample_rate,
+                    22050,
+                );
+
+                // Convert f32 audio into signed 16-bit PCM
+                let mut pcm: Vec<u8> =
+                    Vec::with_capacity(resampled.len() * 2);
+
+                for sample in resampled {
+                    let value =
+                        (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+
+                    pcm.extend_from_slice(&value.to_le_bytes());
+                }
+
+                // Send audio through Windows SAPI5
+                let mut buffer = pcm.as_slice();
+
+                while !buffer.is_empty() {
                     let written_bytes = unsafe {
-                        output_site.Write(buffer.as_ptr().cast(), buffer.len().min(4096) as u32)
+                        output_site.Write(
+                            buffer.as_ptr().cast(),
+                            buffer.len().min(4096) as u32,
+                        )
                     }?;
-                    buffer = &buffer[written_bytes as usize..];
-                    if buffer.is_empty() {
+
+                    if written_bytes == 0 {
+                        log::error!("SAPI5 output accepted zero bytes");
                         break;
                     }
 
-                    // Call GetActions as often as possible (returns bitflags):
-                    // https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ee431802(v=vs.85)
-                    let actions = unsafe { output_site.GetActions() } as i32;
-                    if actions == SPVES_CONTINUE.0 {
-                        continue;
-                    }
+                    buffer = &buffer[written_bytes as usize..];
+
+                    // Check whether Windows requested cancellation
+                    let actions =
+                        unsafe { output_site.GetActions() } as i32;
+
                     if SPVES_ABORT.0 & actions != 0 {
                         return Ok(());
                     }
-                    // TODO: handle other actions
                 }
             }
         }
@@ -368,7 +430,7 @@ impl SafeTtsEngine for OurTtsEngine {
             return Ok(SpeechFormat::DebugText);
         }
 
-        // SPSF_16kHz16BitMono (22kHz 16Bit mono)
+        // SAPI5 output: 22050 Hz, 16-bit PCM, mono
         // TODO: some models have other output formats
         let nSamplesPerSec = 22050;
         let nBlockAlign = 2;
